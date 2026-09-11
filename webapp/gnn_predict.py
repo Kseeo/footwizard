@@ -1,35 +1,28 @@
-"""GNN 하중 변형 예측 -- 마법사 프로세스 안에서 hplAI 저장소의
-build_dataset.py -> predict.py -> export_glb.py를 순서대로 subprocess 호출한다.
+"""GNN 하중 변형 예측 -- hplAI 저장소의 glb_preprocess/api_server.py(상시 실행,
+모델을 메모리에 캐시해둔 GNN API 서버)에 HTTP로 요청한다.
 
-torch 환경(GNN_PYTHON)만 별도 conda라 그 경계는 여전히 subprocess다. 경로는
-이 머신 기준 절대경로라 다른 머신이면 GNN_REPO_DIR/GNN_PYTHON/GNN_TRAIN_DATASET_*
-환경변수로 맞춰야 한다.
-"""
+예전엔 매 요청마다 build_dataset.py -> predict.py -> export_glb.py를 별도
+subprocess 3개로 띄웠는데, predict.py 쪽만 torch/PyTorch Geometric/wandb
+import에 매번 ~10초가 들어서(실제 추론 자체는 ~0.1-0.3초) 전체가 느렸다.
+api_server.py는 모델을 프로세스 안에 캐시해두고 계속 떠 있어서, 그 ~10초를
+서버 시작 시점(또는 그 모델의 첫 요청)에 딱 한 번만 낸다 -- 그래서 여기서도
+subprocess 대신 그 서버를 호출하는 쪽으로 바꿨다. GNN_API_URL 환경변수로
+주소를 바꿀 수 있다 (기본 http://127.0.0.1:5052, 이 머신 기준).
+
+torch 자체는 이제 이 프로세스(footwizard, foot_modeling conda env)에 전혀
+안 들어온다 -- requests로 호출만 한다."""
 from __future__ import annotations
 
+import base64
+import json
 import os
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
-import numpy as np
+import requests
 import trimesh
 
-GNN_REPO_DIR = Path(os.environ.get("GNN_REPO_DIR", "/home/hpl/ai/hplAI"))
-GNN_PYTHON = os.environ.get("GNN_PYTHON", "/home/hpl/miniconda3/envs/mesh/bin/python")
-GLB_PREPROCESS_DIR = GNN_REPO_DIR / "glb_preprocess"
-CHECKPOINTS_DIR = GNN_REPO_DIR / "checkpoints_local"
+GNN_API_URL = os.environ.get("GNN_API_URL", "http://127.0.0.1:5052")
 
-# 학습 때 쓴 데이터셋 통계(정규화 등) -- 사용자가 고르는 값이 아니라 체크포인트에
-# 고정된 조건. 다른 데이터셋으로 학습한 체크포인트를 쓰면 여기도 맞춰야 함.
-DEFAULT_TRAIN_DATASET_PATH = os.environ.get(
-    "GNN_TRAIN_DATASET_PATH", "/home/hpl/data/GNN_dataset/foot_all_1_frame"
-)
-DEFAULT_TRAIN_DATASET_FILE = os.environ.get("GNN_TRAIN_DATASET_FILE", "C3_bio.pt")
-DEFAULT_TARGET_FACES = 6000
-
-# hplAI의 foot_pipeline_postsmooth.py 기본값과 맞춘 것(라플라시안 스무딩 + 바닥 재접지).
 SMOOTH_DEFAULTS = {"lamb": 0.5, "iterations": 10, "floor_percentile": 0.5}
 
 
@@ -40,132 +33,104 @@ class GnnPredictError(RuntimeError):
 
 
 def list_checkpoints() -> list[dict]:
-    """모델 선택 드롭다운용 -- checkpoints_local/*.pt 목록."""
-    return [{"id": p.name, "label": p.stem} for p in sorted(CHECKPOINTS_DIR.glob("*.pt"))]
+    """모델 선택 드롭다운용 -- api_server.py의 MODEL_REGISTRY를 그대로 가져온다
+    (checkpoints_local/*.pt를 직접 스캔하던 예전 방식 대신, api_server.py가
+    실제로 서빙하는 모델과 항상 일치하도록 그쪽을 단일 출처로 삼는다)."""
+    try:
+        r = requests.get(f"{GNN_API_URL}/health", timeout=10)
+        r.raise_for_status()
+        models = r.json().get("models", [])
+    except requests.RequestException as e:
+        raise GnnPredictError(f"GNN 서버({GNN_API_URL})에 연결할 수 없습니다: {e}")
+    return [
+        {"id": m["key"], "label": m["label"] + ("" if m.get("found") else " (checkpoint 없음)")}
+        for m in models
+    ]
 
 
-def _subprocess_env() -> dict:
-    return {
-        **os.environ,
-        "KMP_DUPLICATE_LIB_OK": "TRUE",
-        "MGN_LOG_DIR": str(GNN_REPO_DIR / "checkpoints_local" / "mgn_logs") + os.sep,
-        "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128",
-        "WANDB_MODE": "offline",
-    }
-
-
-def _run_step(cmd: list[str], log_lines: list[str]) -> None:
-    log_lines.append("$ " + " ".join(cmd))
-    result = subprocess.run(
-        cmd, cwd=str(GNN_REPO_DIR), capture_output=True, text=True, env=_subprocess_env(),
-    )
-    if result.stdout:
-        log_lines.append(result.stdout)
-    if result.stderr:
-        log_lines.append(result.stderr)
-    if result.returncode != 0:
-        raise GnnPredictError(f"단계 실패(exit {result.returncode}): {' '.join(cmd)}", "\n".join(log_lines))
-
-
-def _detect_up_axis(vertices: np.ndarray) -> int:
-    """위쪽 축 = 최솟값이 0에 가장 가까운 축(메쉬가 바닥에 붙어 있다고 가정)."""
-    mins = vertices.min(axis=0)
-    return int(np.argmin(np.abs(mins)))
-
-
-def _smooth_mesh(glb_path: Path, out_path: Path, lamb: float, iterations: int, floor_percentile: float) -> None:
-    mesh = trimesh.load(glb_path, force="mesh", process=False)
-    trimesh.smoothing.filter_laplacian(mesh, lamb=lamb, iterations=iterations)
-    up_axis = _detect_up_axis(mesh.vertices)
-    floor = np.percentile(mesh.vertices[:, up_axis], floor_percentile)
-    mesh.vertices[:, up_axis] -= floor
-    mesh.export(out_path)
+def _write_progress(progress_path: Path | None, step: str, message: str) -> None:
+    """진행상황을 job 폴더에 JSON 한 파일로 남긴다 -- 프론트엔드가 메인 요청이
+    끝나길 기다리는 동안 별도로 폴링해서 "지금 어느 단계인지" 보여줄 수 있게.
+    원자적으로 쓰기 위해 임시파일에 쓰고 rename(같은 파일시스템에서 원자적)."""
+    if progress_path is None:
+        return
+    tmp = progress_path.with_suffix(progress_path.suffix + ".tmp")
+    tmp.write_text(json.dumps({"step": step, "message": message}), encoding="utf-8")
+    tmp.replace(progress_path)
 
 
 def predict(
     input_glb: Path,
     out_dir: Path,
     checkpoint: str,
-    target_faces: int = DEFAULT_TARGET_FACES,
+    target_faces: int | None = None,
     smooth: bool = True,
     lamb: float | None = None,
     iterations: int | None = None,
     floor_percentile: float | None = None,
+    progress_path: Path | None = None,
 ) -> dict:
-    """input_glb를 예측해 out_dir에 5_gnn_predicted.glb(및 smooth=True면 5_gnn_smoothed.glb)를 쓴다."""
-    checkpoint_path = CHECKPOINTS_DIR / checkpoint
-    if not checkpoint_path.is_file():
-        raise GnnPredictError(f"체크포인트를 찾을 수 없습니다: {checkpoint}")
+    """input_glb를 예측해 out_dir에 5_gnn_predicted.glb(및 smooth=True면
+    5_gnn_smoothed.glb)를 쓴다. checkpoint는 list_checkpoints()가 돌려준 id
+    (api_server.py MODEL_REGISTRY 키, 예: "graphormer_roll2")."""
+    _write_progress(progress_path, "uploading", "GNN 서버로 전송하는 중...")
 
     lamb = SMOOTH_DEFAULTS["lamb"] if lamb is None else lamb
     iterations = SMOOTH_DEFAULTS["iterations"] if iterations is None else iterations
     floor_percentile = SMOOTH_DEFAULTS["floor_percentile"] if floor_percentile is None else floor_percentile
 
-    work_dir = Path(tempfile.mkdtemp(prefix="wizard_gnn_"))
-    log_lines: list[str] = []
+    data = {
+        "model": checkpoint,
+        "smooth": "true" if smooth else "false",
+        "lamb": lamb, "iterations": iterations, "floor_percentile": floor_percentile,
+        "format": "json",
+    }
+    if target_faces is not None:
+        data["target_faces"] = target_faces
+
+    _write_progress(progress_path, "predict", "GNN 서버에서 예측하는 중...")
     try:
-        stem = "scan"
-        input_dir = work_dir / "input"
-        input_dir.mkdir()
-        staged = input_dir / f"{stem}.glb"
-        shutil.copyfile(input_glb, staged)
+        with open(input_glb, "rb") as f:
+            r = requests.post(
+                f"{GNN_API_URL}/predict", files={"file": (input_glb.name, f)}, data=data, timeout=300,
+            )
+    except requests.RequestException as e:
+        raise GnnPredictError(f"GNN 서버({GNN_API_URL})에 연결할 수 없습니다: {e}")
 
-        scan_pt = work_dir / "scan.pt"
-        pred_pt = work_dir / "predictions.pt"
-        glb_out_dir = work_dir / "glb"
+    try:
+        payload = r.json()
+    except ValueError:
+        raise GnnPredictError(f"GNN 서버 응답을 해석할 수 없습니다 (HTTP {r.status_code})", r.text[:4000])
+    if not r.ok:
+        raise GnnPredictError(payload.get("error", f"HTTP {r.status_code}"), payload.get("log", ""))
 
-        _run_step([
-            GNN_PYTHON, str(GLB_PREPROCESS_DIR / "build_dataset.py"),
-            "--input_dir", str(input_dir), "--pattern", f"{stem}.glb",
-            "--output", str(scan_pt), "--target_faces", str(target_faces),
-        ], log_lines)
+    _write_progress(progress_path, "saving", "결과를 저장하는 중...")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        _run_step([
-            GNN_PYTHON, str(GLB_PREPROCESS_DIR / "predict.py"),
-            "--checkpoint", str(checkpoint_path),
-            "--train_dataset_path", DEFAULT_TRAIN_DATASET_PATH,
-            "--train_dataset_file", DEFAULT_TRAIN_DATASET_FILE,
-            "--scan_dataset", str(scan_pt), "--output", str(pred_pt),
-        ], log_lines)
+    predicted_name = "5_gnn_predicted.glb"
+    predicted_bytes = base64.b64decode(payload["predicted"])
+    (out_dir / predicted_name).write_bytes(predicted_bytes)
+    predicted_mesh = trimesh.load(out_dir / predicted_name, force="mesh", process=False)
 
-        _run_step([
-            GNN_PYTHON, str(GLB_PREPROCESS_DIR / "export_glb.py"),
-            "--predictions", str(pred_pt), "--output_dir", str(glb_out_dir),
-        ], log_lines)
+    result = {
+        "checkpoint": checkpoint,
+        "predicted_file": predicted_name,
+        "predicted_n_vertices": len(predicted_mesh.vertices),
+        "predicted_n_faces": len(predicted_mesh.faces),
+        "smoothed_file": None,
+        "smoothed_n_vertices": None,
+        "smoothed_n_faces": None,
+        "smooth_error": payload.get("smooth_error"),
+        "log": payload.get("log", ""),
+    }
 
-        predicted_src = glb_out_dir / f"{stem}_predicted.glb"
-        if not predicted_src.is_file():
-            raise GnnPredictError(f"예측 결과가 없습니다: {predicted_src}", "\n".join(log_lines))
+    if payload.get("smoothed"):
+        smoothed_name = "5_gnn_smoothed.glb"
+        (out_dir / smoothed_name).write_bytes(base64.b64decode(payload["smoothed"]))
+        smoothed_mesh = trimesh.load(out_dir / smoothed_name, force="mesh", process=False)
+        result["smoothed_file"] = smoothed_name
+        result["smoothed_n_vertices"] = len(smoothed_mesh.vertices)
+        result["smoothed_n_faces"] = len(smoothed_mesh.faces)
 
-        out_dir.mkdir(parents=True, exist_ok=True)
-        predicted_name = "5_gnn_predicted.glb"
-        shutil.copyfile(predicted_src, out_dir / predicted_name)
-        predicted_mesh = trimesh.load(out_dir / predicted_name, force="mesh", process=False)
-
-        result = {
-            "checkpoint": checkpoint,
-            "predicted_file": predicted_name,
-            "predicted_n_vertices": len(predicted_mesh.vertices),
-            "predicted_n_faces": len(predicted_mesh.faces),
-            "smoothed_file": None,
-            "smoothed_n_vertices": None,
-            "smoothed_n_faces": None,
-            "smooth_error": None,
-            "log": "\n".join(log_lines)[-8000:],
-        }
-
-        if smooth:
-            try:
-                smoothed_name = "5_gnn_smoothed.glb"
-                _smooth_mesh(out_dir / predicted_name, out_dir / smoothed_name, lamb, iterations, floor_percentile)
-                smoothed_mesh = trimesh.load(out_dir / smoothed_name, force="mesh", process=False)
-                result["smoothed_file"] = smoothed_name
-                result["smoothed_n_vertices"] = len(smoothed_mesh.vertices)
-                result["smoothed_n_faces"] = len(smoothed_mesh.faces)
-            except Exception as e:  # noqa: BLE001
-                # 스무딩 실패해도 예측 결과는 그대로 돌려준다.
-                result["smooth_error"] = str(e)
-
-        return result
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+    _write_progress(progress_path, "done", "완료")
+    return result

@@ -26,6 +26,20 @@ from foot_engine.sfm.dense import align_sole_down, keep_largest_component, sole_
 from foot_engine.stl_foot_extract.postprocess_pipeline import crop_foot_mesh  # noqa: E402
 
 
+def _write_progress(job_dir: Path, step: str, message: str, current: int | None = None, total: int | None = None) -> None:
+    """app.py의 폴링 라우트(GET /api/stage1_orientation_progress/<job_id>)가 읽는
+    진행상황 파일. 임시파일에 쓰고 rename해서 읽는 쪽이 항상 완전한 JSON만 보게 한다."""
+    progress_path = job_dir / "1a_progress.json"
+    payload = {"step": step, "message": message}
+    if current is not None:
+        payload["current"] = current
+    if total is not None:
+        payload["total"] = total
+    tmp = progress_path.with_suffix(progress_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(progress_path)
+
+
 def _render_preview(mesh: trimesh.Trimesh, out_path: Path) -> None:
     """방향 확인용 빠른 미리보기 한 장(발바닥이 아래로 가게 정렬된 상태에서 옆에서 봄)."""
     scene = mesh.scene()
@@ -43,18 +57,26 @@ def main() -> int:
     p.add_argument("--k", type=int, default=10)
     p.add_argument("--result_json", required=True)
     args = p.parse_args()
+    job_dir = Path(args.job_dir)
 
+    _write_progress(job_dir, "crop", "발 영역을 추출하는 중...")
     cropped_mesh, _ = crop_foot_mesh(args.input)
     out_cropped = Path(args.output_cropped)
     cropped_mesh.export(out_cropped)
 
-    job_dir = Path(args.job_dir)
+    _write_progress(job_dir, "components", "메쉬 조각을 정리하는 중...")
     # 후보 계산과 같은 전처리(가장 큰 조각만 남기기)를 거쳐야 좌표계가 맞는다.
     largest, _, _ = keep_largest_component(cropped_mesh)
+
+    _write_progress(job_dir, "candidates", "발바닥 방향 후보를 계산하는 중...")
     candidates = sole_direction_candidates_for_mesh(cropped_mesh, k=args.k)
 
     info = {"cropped_file": out_cropped.name, "candidates": []}
     for i, cand in enumerate(candidates):
+        _write_progress(
+            job_dir, "rendering", f"미리보기 렌더링 중 ({i + 1}/{len(candidates)})...",
+            current=i + 1, total=len(candidates),
+        )
         aligned = align_sole_down(largest, down_direction=cand.direction)
         thumb_name = f"1a_cand{i}.png"
         _render_preview(aligned, job_dir / thumb_name)
@@ -66,6 +88,7 @@ def main() -> int:
         })
 
     Path(args.result_json).write_text(json.dumps(info), encoding="utf-8")
+    _write_progress(job_dir, "done", "완료")
     return 0
 
 

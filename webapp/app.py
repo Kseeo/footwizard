@@ -125,7 +125,11 @@ def api_upload():
 
 @app.route("/api/stage1_orientation/<job_id>", methods=["POST"])
 def api_stage1_orientation(job_id):
-    """발을 크롭하고 발바닥 방향 후보들을 미리보기 이미지로 반환 -- 사람이 눈으로 고른다."""
+    """발을 크롭하고 발바닥 방향 후보들을 미리보기 이미지로 반환 -- 사람이 눈으로 고른다.
+
+    이 요청이 끝날 때까지(최대 몇십 초) GET /api/stage1_orientation_progress/<job_id>를
+    폴링하면 지금 어느 단계인지 알 수 있다 -- 워커 서브프로세스가 job_dir에 진행상황을
+    파일로 남기기 때문."""
     try:
         d = job_dir(job_id)
         inputs = list(d.glob("0_input.*"))
@@ -134,6 +138,8 @@ def api_stage1_orientation(job_id):
 
         out_cropped = d / "1a_cropped.glb"
         result_json = d / "1a_orientation_result.json"
+        progress_json = d / "1a_progress.json"
+        progress_json.unlink(missing_ok=True)  # 이전 실행(재크롭 등)의 stale 진행상황 제거
         cmd = _stage1_orientation_worker_cmd() + [
             "--input", str(inputs[0]), "--output_cropped", str(out_cropped),
             "--job_dir", str(d), "--result_json", str(result_json),
@@ -152,6 +158,25 @@ def api_stage1_orientation(job_id):
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return jsonify(error=str(e)), 500
+
+
+@app.route("/api/stage1_orientation_progress/<job_id>", methods=["GET"])
+def api_stage1_orientation_progress(job_id):
+    """위 라우트가 처리 중일 때 폴링용. 아직 파일이 없으면(워커가 막 시작해서
+    첫 단계도 안 적었거나, 아예 시작 전) 기본 상태를 돌려준다 -- 404 대신 200으로
+    프론트엔드 폴링 루프를 단순하게 유지."""
+    try:
+        d = job_dir(job_id)
+    except FileNotFoundError:
+        return jsonify(step="pending", message="")
+    progress_json = d / "1a_progress.json"
+    if not progress_json.exists():
+        return jsonify(step="pending", message="시작 대기 중...")
+    try:
+        return jsonify(**json.loads(progress_json.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, OSError):
+        # 워커가 마침 그 순간 파일을 쓰던 중(rename 직전)일 수 있음 -- 다음 폴링에 정상화됨
+        return jsonify(step="pending", message="진행 중...")
 
 
 @app.route("/api/align_for_cut/<job_id>", methods=["POST"])
@@ -256,7 +281,10 @@ def api_gnn_checkpoints():
 
 @app.route("/api/send_to_gnn/<job_id>", methods=["POST"])
 def api_send_to_gnn(job_id):
-    """job_id 폴더 안의 메쉬(source_file, 기본 "4_final.glb")를 GNN으로 예측한다."""
+    """job_id 폴더 안의 메쉬(source_file, 기본 "4_final.glb")를 GNN으로 예측한다.
+
+    이 요청이 끝날 때까지 GET /api/send_to_gnn_progress/<job_id>를 폴링하면
+    build_dataset/predict/export_glb 중 지금 어느 단계인지 알 수 있다."""
     try:
         d = job_dir(job_id)
         args = request.get_json(silent=True) or {}
@@ -273,11 +301,14 @@ def api_send_to_gnn(job_id):
         iterations = args.get("iterations")
         floor_percentile = args.get("floor_percentile")
 
+        progress_json = d / "5_gnn_progress.json"
+        progress_json.unlink(missing_ok=True)  # 이전 실행의 stale 진행상황 제거
         result = gnn_predict.predict(
             src_path, d, checkpoint=checkpoint, smooth=smooth,
             lamb=float(lamb) if lamb is not None else None,
             iterations=int(iterations) if iterations is not None else None,
             floor_percentile=float(floor_percentile) if floor_percentile is not None else None,
+            progress_path=progress_json,
         )
 
         write_meta(
@@ -297,6 +328,23 @@ def api_send_to_gnn(job_id):
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return jsonify(error=str(e)), 500
+
+
+@app.route("/api/send_to_gnn_progress/<job_id>", methods=["GET"])
+def api_send_to_gnn_progress(job_id):
+    """위 라우트가 처리 중일 때 폴링용 -- build_dataset/predict/export_glb 중
+    어느 단계인지. 파일이 아직 없으면(막 시작) 기본 상태를 200으로 돌려준다."""
+    try:
+        d = job_dir(job_id)
+    except FileNotFoundError:
+        return jsonify(step="pending", message="")
+    progress_json = d / "5_gnn_progress.json"
+    if not progress_json.exists():
+        return jsonify(step="pending", message="시작 대기 중...")
+    try:
+        return jsonify(**json.loads(progress_json.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, OSError):
+        return jsonify(step="pending", message="진행 중...")
 
 
 @app.route("/api/jobs", methods=["GET"])

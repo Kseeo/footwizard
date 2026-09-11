@@ -404,6 +404,57 @@ async function postJSON(url, body) {
   return data;
 }
 
+// 오래 걸리는 단계(방향 후보 계산, GNN 예측) 동안 진행상황 폴링용.
+// progressUrl을 계속 GET해서 statusId 엘리먼트에 message를 표시하고,
+// 멈추는 함수를 반환한다 -- 메인 요청이 끝나면(성공/실패 상관없이) 호출해야 함.
+// fetch는 업로드 진행률(%)을 못 주기 때문에 파일 전송 자체가 오래 걸릴 수 있는
+// 업로드(큰 스캔 파일)는 XMLHttpRequest로 바이트 단위 진행률을 보여준다.
+function uploadFileWithProgress(url, file, statusId, label) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        setStatus(statusId, `${label} 업로드하는 중... (${pct}%, ${(e.loaded / 1048576).toFixed(1)}/${(e.total / 1048576).toFixed(1)}MB)`);
+      } else {
+        setStatus(statusId, `${label} 업로드하는 중...`);
+      }
+    };
+    xhr.onload = () => {
+      let data;
+      try { data = JSON.parse(xhr.responseText); } catch (_e) { data = { error: "서버 응답을 해석할 수 없습니다" }; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(data);
+    };
+    xhr.onerror = () => reject({ error: "네트워크 오류로 업로드에 실패했습니다" });
+    const fd = new FormData();
+    fd.append("file", file);
+    xhr.send(fd);
+  });
+}
+
+function pollProgress(progressUrl, statusId, prefix) {
+  let stopped = false;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const res = await fetch(progressUrl);
+      const data = await res.json();
+      if (!stopped && data.message) {
+        let text = prefix + data.message;
+        if (data.current && data.total) text += ` (${data.current}/${data.total})`;
+        setStatus(statusId, text);
+      }
+    } catch (_e) {
+      // 네트워크 순간 끊김 정도는 무시 -- 다음 tick에서 회복
+    }
+    if (!stopped) setTimeout(tick, 700);
+  };
+  tick();
+  return () => { stopped = true; };
+}
+
 // ---------- 1단계: 업로드 ----------
 const dropzone = $("dropzone");
 const fileInput = $("fileInput");
@@ -431,13 +482,9 @@ $("btnToStep2").onclick = async () => {
   setBusy(btn, true);
   setStatus("status1", "");
   try {
-    const fd = new FormData();
-    fd.append("file", pendingFile);
-    const res = await fetch("/api/upload", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) throw data;
+    const data = await uploadFileWithProgress("/api/upload", pendingFile, "status1", pendingFile.name);
     jobId = data.job_id;
-    await loadOrientationCandidates();
+    await loadOrientationCandidates("status1");
     setStep(2);
   } catch (err) {
     setStatus("status1", (err.error || "업로드 실패"), true);
@@ -449,16 +496,26 @@ $("btnToStep2").onclick = async () => {
 const CAND_BATCH = 5; // 처음엔 이만큼만 보여주고, "더 보기"는 이미 받아둔 후보 중 다음 묶음을 보여줌(재크롭 안 함)
 let visibleCount = CAND_BATCH;
 
-async function loadOrientationCandidates() {
-  setStatus("status2", "발을 검출하고 방향 후보를 계산하는 중... (약 20-30초)");
-  const data = await postJSON(`/api/stage1_orientation/${jobId}`, {});
+async function loadOrientationCandidates(statusId) {
+  // 처음 호출(1->2단계 전환)은 아직 1단계 패널이 보이는 상태라 status1에,
+  // "재크롭"(이미 2단계 화면)은 status2에 진행상황을 띄운다 -- 안 그러면
+  // 숨겨진 패널에 텍스트가 찍혀서 사용자한텐 스피너만 도는 것처럼 보인다.
+  statusId = statusId || "status2";
+  setStatus(statusId, "발을 검출하고 방향 후보를 계산하는 중...");
+  const stopPolling = pollProgress(`/api/stage1_orientation_progress/${jobId}`, statusId, "");
+  let data;
+  try {
+    data = await postJSON(`/api/stage1_orientation/${jobId}`, {});
+  } finally {
+    stopPolling();
+  }
   candidates = data.candidates;
   croppedFile = data.cropped_file;
   candIndex = 0;
   visibleCount = Math.min(CAND_BATCH, candidates.length);
   renderCandidate();
   updateRecropButton();
-  setStatus("status2", "");
+  setStatus(statusId, "");
 }
 
 function updateRecropButton() {
@@ -835,12 +892,7 @@ $("btnRunGnn").onclick = async () => {
   try {
     let sourceJobId, sourceFile;
     if (gnnSourceMode === "upload") {
-      setStatus("gnnProgressLabel", `"${gnnPendingFile.name}" 업로드하는 중...`);
-      const fd = new FormData();
-      fd.append("file", gnnPendingFile);
-      const res = await fetch("/api/upload", { method: "POST", body: fd });
-      const up = await res.json();
-      if (!res.ok) throw up;
+      const up = await uploadFileWithProgress("/api/upload", gnnPendingFile, "gnnProgressLabel", gnnPendingFile.name);
       sourceJobId = up.job_id;
       sourceFile = up.filename; // 예: "0_input.glb" -- 전처리 단계는 거치지 않은 원본 그대로
     } else {
@@ -848,10 +900,16 @@ $("btnRunGnn").onclick = async () => {
       sourceFile = gnnHistoryJob.final_file;
     }
 
-    setStatus("gnnProgressLabel", "GNN 하중 변형을 예측하는 중... (몇 분 걸릴 수 있습니다)");
-    const data = await postJSON(`/api/send_to_gnn/${sourceJobId}`, {
-      checkpoint, smooth, lamb, iterations, floor_percentile, source_file: sourceFile,
-    });
+    setStatus("gnnProgressLabel", "GNN 하중 변형을 예측하는 중...");
+    const stopGnnPolling = pollProgress(`/api/send_to_gnn_progress/${sourceJobId}`, "gnnProgressLabel", "");
+    let data;
+    try {
+      data = await postJSON(`/api/send_to_gnn/${sourceJobId}`, {
+        checkpoint, smooth, lamb, iterations, floor_percentile, source_file: sourceFile,
+      });
+    } finally {
+      stopGnnPolling();
+    }
 
     $("gnnViewPredicted").src = `/jobs/${sourceJobId}/${data.predicted_file}`;
     $("gnnDlPredicted").href = `/jobs/${sourceJobId}/${data.predicted_file}?download=1`;
