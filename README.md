@@ -34,10 +34,9 @@
   전담하는 워커(3D 렌더링이 서버 프로세스를 불안정하게 만들 수 있어 매
   요청마다 별도 프로세스로 띄운다).
 - `webapp/templates/wizard.html` -- 마법사 화면 전체(HTML/CSS/JS 한 파일).
-- `src/foot_engine/` -- 실제 메쉬 처리 로직.
-  - `stl_foot_extract/` -- 마법사가 쓰는 발 추출 파이프라인(크롭 →
-    정렬 → 절단 → 정리).
-  - `sfm/` -- `stl_foot_extract`가 재사용하는 메쉬 정렬/절단 유틸.
+- `src/foot_engine/` -- 실제 메쉬 처리 로직. `pipeline.py`가 진입점(크롭 →
+  정렬 → 절단 → 정리), 나머지 모듈은 그게 갖다 쓰는 유틸(자세한 역할은
+  `src/foot_engine/__init__.py` 참고).
 - `data/models/` -- 피부 분류에 쓰는 MediaPipe 모델 파일.
 - `build.ps1` -- PyInstaller 빌드 스크립트(실행하면 `FootExtractWizard.spec`을
   이 폴더에 새로 만든다 -- 그 파일은 개인 PC 경로가 담겨 git엔 안 올림).
@@ -48,11 +47,11 @@
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\pip install flask trimesh numpy opencv-python mediapipe scipy scikit-learn networkx pyglet pyinstaller
+.venv\Scripts\pip install -r requirements.txt
 ```
 
-(정확한 버전 고정이 필요하면 실제 설치된 패키지로 `pip freeze >
-requirements.txt`를 만들어 커밋해둘 것을 권장합니다.)
+exe 빌드까지 하려면 `pyinstaller`도 추가로 설치할 것(`requirements.txt`엔
+빌드 도구는 안 들어있음, 실행에 필요한 패키지만).
 
 ## exe 빌드
 

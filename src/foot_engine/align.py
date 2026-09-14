@@ -1,6 +1,6 @@
 """메쉬 정렬/절단 유틸 — 발바닥 방향 탐지, 바닥 접지, 수동 절단처럼 사진 없이
-메쉬 하나만으로 되는 순수 기하 계산. `stl_foot_extract.postprocess_pipeline`이
-이 모듈의 함수들로 마법사 3~4단계(정렬 → 절단 → 접지)를 조립한다.
+메쉬 하나만으로 되는 순수 기하 계산. `pipeline.py`가 이 모듈의 함수들로
+마법사 3~4단계(정렬 → 절단 → 접지)를 조립한다.
 
 발목 절단 높이는 자동으로 찾지 않고 사람이 3D 뷰어로 보고 직접 고른다
 (`cut_at_height()`).
@@ -13,8 +13,8 @@ from dataclasses import dataclass
 import numpy as np
 import trimesh
 
+from .finishing import finish_smooth_mesh, keep_largest_component
 from .geometry import pca_axes
-from .mesh_postprocess import finish_smooth_mesh, keep_largest_component
 
 #: 자기신고 발길이 없을 때 쓰는 임시 스케일 기준값(mm). 절대 축척 아님.
 DEFAULT_REFERENCE_LENGTH_MM = 250.0
@@ -299,4 +299,3 @@ def find_floor_contact_mask(
     print(f"[floor-contact] 접지 노드 {int(mask.sum()):,}/{len(mask):,}개 "
           f"({100 * mask.mean():.1f}%, 허용오차 {tolerance_mm:.1f}mm)")
     return mask
-

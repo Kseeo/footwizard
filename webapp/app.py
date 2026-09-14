@@ -70,11 +70,8 @@ _BUNDLE_DIR = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent 
 JOBS_DIR = _APP_DIR / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
-from foot_engine.stl_foot_extract.finishing import smooth_boundary_loops  # noqa: E402
-from foot_engine.stl_foot_extract.postprocess_pipeline import (  # noqa: E402
-    align_for_manual_cut,
-    cut_and_finish_mesh,
-)
+from foot_engine.finishing import smooth_boundary_loops  # noqa: E402
+from foot_engine.pipeline import align_for_manual_cut, cut_and_finish_mesh  # noqa: E402
 STAGE1_ORIENTATION_WORKER = Path(__file__).resolve().parent / "stage1_orientation_worker.py"
 
 

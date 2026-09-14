@@ -2,7 +2,7 @@
 발을 자동으로 크롭한다.
 
 - crop.py/branch_cut.py/locate.py는 색 없는 STL 전제라 이 신호를 못 씀
-  (sfm.masking의 MediaPipe 피부 분할은 색 의존). 텍스처 입력에서는 그
+  (skin_mask.py의 MediaPipe 피부 분할은 색 의존). 텍스처 입력에서는 그
   모델을 재사용 -- 가상 카메라 여러 곳에서 렌더 후 정점별 "피부로 보인
   횟수"를 투표(multi-view semantic fusion), 사진/카메라 포즈 불필요.
 - 한계: glTF/GLB는 UV 이음매에서 정점이 복제돼(같은 3D 위치, 다른 UV) 위상
@@ -21,9 +21,8 @@ import scipy.sparse.csgraph as csg
 import trimesh
 from scipy.spatial import cKDTree
 
-from foot_engine.sfm.masking import load_skin_segmenter, skin_only_mask
-
 from .crop import _remove_vertices
+from .skin_mask import load_skin_segmenter, skin_only_mask
 
 
 def load_textured_mesh(path) -> trimesh.Trimesh:
