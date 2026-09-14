@@ -26,6 +26,12 @@
 `requirements.txt`(직접 만들어야 함 -- 아래 "패키지 설치" 참고)를 미리
 설치해둔 파이썬 환경이어야 합니다.
 
+## (exe 대신) 리눅스 서버에 상시 웹 서비스로 실행
+
+각자 PC에 exe를 배포하는 대신 서버 한 대에 계속 띄워두고 사내망에서
+URL로 접속하고 싶다면 `deploy/README.md`를 참고하세요(`webapp/serve.py`
+진입점 + Xvfb + systemd --user 서비스 구성).
+
 ## 폴더 구조
 
 - `webapp/launcher.py` -- exe 진입점. Flask 서버를 띄우고 브라우저를 연다.
