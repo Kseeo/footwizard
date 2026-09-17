@@ -55,3 +55,6 @@ data/
 # 실행 중 생성되는 사용자 업로드/작업 결과물(webapp/app.py의 JOBS_DIR) --
 # 실제 사용자가 올린 3D 스캔 파일이 들어갈 수 있어 절대 커밋하지 않는다.
 webapp/jobs/
+
+# Claude Code 로컬 백업 스냅샷
+.claude_backups/
