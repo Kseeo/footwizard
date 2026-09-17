@@ -1,6 +1,6 @@
 """배경/파편 제거 + 스무딩(구멍 메움/사포질/고곡률 완화/마감) -- 입력이 메쉬
-하나뿐, 사진/카메라 정보 불필요. `postprocess_pipeline.py`가 이 모듈의
-`postprocess_mesh()`를 쓴다.
+하나뿐, 사진/카메라 정보 불필요. `pipeline.py`가 이 모듈의 `postprocess_mesh()`를
+쓴다.
 """
 
 from __future__ import annotations

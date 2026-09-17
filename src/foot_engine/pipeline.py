@@ -8,8 +8,8 @@
     2. `align_for_manual_cut()` -- 고른 방향으로 정렬만(자르기 전)
     3. `cut_and_finish_mesh()` -- 사람이 고른 높이에서 절단 + `finishing.
        postprocess_mesh()`(배경 파편 제거+스무딩+구멍 메움) + 스케일 +
-       `sfm.dense.decimate_mesh()`(정점 수 맞춤) +
-       `sfm.dense.find_floor_contact_mask()`(접지 노드)
+       `align.decimate_mesh()`(정점 수 맞춤) +
+       `align.find_floor_contact_mask()`(접지 노드)
 """
 
 from __future__ import annotations
@@ -20,22 +20,20 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from foot_engine.sfm.dense import (
+from .align import (
     DEFAULT_REFERENCE_LENGTH_MM,
     DEFAULT_TARGET_VERTICES,
     align_sole_down,
     cut_at_height,
     decimate_mesh,
     find_floor_contact_mask,
-    keep_largest_component,
     prune_far_fragments,
     rest_on_floor,
     to_z_up,
 )
-from foot_engine.sfm.geometry import measured_length
-
 from .branch_cut import pick_most_foot_like, suggest_neck_components
-from .finishing import postprocess_mesh
+from .finishing import keep_largest_component, postprocess_mesh
+from .geometry import measured_length
 from .texture_crop import extract_by_skin_vote, load_textured_mesh
 
 
@@ -205,4 +203,3 @@ def cut_and_finish_mesh(
         up_axis="Z" if z_up else "Y",
         floor_contact_mask=floor_contact_mask,
     )
-

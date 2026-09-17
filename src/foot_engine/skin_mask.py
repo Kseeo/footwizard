@@ -25,7 +25,7 @@ def _default_skin_model_path() -> Path:
     """
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "data" / "models" / "selfie_multiclass_256x256.tflite"  # type: ignore[attr-defined]
-    return Path(__file__).resolve().parents[3] / "data" / "models" / "selfie_multiclass_256x256.tflite"
+    return Path(__file__).resolve().parents[2] / "data" / "models" / "selfie_multiclass_256x256.tflite"
 
 
 DEFAULT_SKIN_MODEL_PATH = _default_skin_model_path()
@@ -63,4 +63,3 @@ def skin_only_mask(segmenter, bgr_image: np.ndarray, *, erode: int = 8) -> np.nd
         kernel = np.ones((erode, erode), np.uint8)
         skin = cv2.erode(skin, kernel)
     return skin
-

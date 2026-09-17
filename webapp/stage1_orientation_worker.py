@@ -22,8 +22,9 @@ sys.stdout = sys.stderr
 
 import trimesh  # noqa: E402
 
-from foot_engine.sfm.dense import align_sole_down, keep_largest_component, sole_direction_candidates_for_mesh  # noqa: E402
-from foot_engine.stl_foot_extract.postprocess_pipeline import crop_foot_mesh  # noqa: E402
+from foot_engine.align import align_sole_down, sole_direction_candidates_for_mesh  # noqa: E402
+from foot_engine.finishing import keep_largest_component  # noqa: E402
+from foot_engine.pipeline import crop_foot_mesh  # noqa: E402
 
 
 def _write_progress(job_dir: Path, step: str, message: str, current: int | None = None, total: int | None = None) -> None:
